@@ -8,14 +8,30 @@ from .base import ApiKeyMixin, BaseSearchEngine, SearchResult, mask_api_key
 
 logger = logging.getLogger(__name__)
 
+BOCHA_ERROR_LOG_BODY_MAX_LENGTH = 512
+
+
+def _truncate_for_log(text: str) -> str:
+    if len(text) <= BOCHA_ERROR_LOG_BODY_MAX_LENGTH:
+        return text
+    return f"{text[:BOCHA_ERROR_LOG_BODY_MAX_LENGTH]}... [truncated]"
+
+
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
 
 def _merge_texts(*values: str) -> str:
     """按顺序合并非空文本,避免把 snippet 和 summary 重复塞给总结 prompt。"""
     merged: list[str] = []
+    seen: set[str] = set()
     for value in values:
         text = value.strip()
-        if text and text not in merged:
+        if text and text not in seen:
             merged.append(text)
+            seen.add(text)
     return "\n".join(merged)
 
 
@@ -80,7 +96,7 @@ class BochaEngine(BaseSearchEngine, ApiKeyMixin):
                                 "Bocha search request failed with status %s for key %s; response body: %s",
                                 response.status,
                                 mask_api_key(api_key),
-                                response_text,
+                                _truncate_for_log(response_text),
                             )
                             continue
 
@@ -94,7 +110,7 @@ class BochaEngine(BaseSearchEngine, ApiKeyMixin):
                             logger.error(
                                 "Failed to parse Bocha response as JSON for key %s: %s",
                                 mask_api_key(api_key),
-                                response_text,
+                                _truncate_for_log(response_text),
                             )
                             continue
 
@@ -115,11 +131,23 @@ class BochaEngine(BaseSearchEngine, ApiKeyMixin):
                     )
                     continue
 
-                web_pages = data.get("webPages") or {}
-                items = web_pages.get("value") if isinstance(web_pages, dict) else None
+                web_pages = data.get("webPages")
+                if web_pages is None:
+                    return []
+                if not isinstance(web_pages, dict):
+                    logger.error(
+                        "Unexpected Bocha webPages type for key %s: %s",
+                        mask_api_key(api_key),
+                        type(web_pages),
+                    )
+                    continue
+
+                items = web_pages.get("value")
+                if items is None:
+                    return []
                 if not isinstance(items, list):
                     logger.error(
-                        "Unexpected Bocha webPages.value for key %s: %s",
+                        "Unexpected Bocha webPages.value type for key %s: %s",
                         mask_api_key(api_key),
                         type(items),
                     )
@@ -142,13 +170,13 @@ class BochaEngine(BaseSearchEngine, ApiKeyMixin):
             if not isinstance(item, dict):
                 continue
 
-            title = self.tidy_text(item.get("name", ""))
-            url = item.get("url", "")
+            title = self.tidy_text(_to_text(item.get("name")))
+            url = _to_text(item.get("url"))
             if not title or not self._is_valid_url(url):
                 continue
 
-            snippet = self.tidy_text(item.get("snippet", ""))
-            summary = self.tidy_text(item.get("summary", ""))
+            snippet = self.tidy_text(_to_text(item.get("snippet")))
+            summary = self.tidy_text(_to_text(item.get("summary")))
             abstract = _merge_texts(snippet, summary)
 
             results.append(
